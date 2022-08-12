@@ -28,7 +28,7 @@ gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg
 EOM
 ```
 
-`sudo yum install google-cloud-sdk`
+`sudo yum install google-cloud-cli`
 
 `sudo mkdir /usr/local/illumina/seq-run-uploads && sudo chown ilmnadmin:ilmnusers /usr/local/illumina/seq-run-uploads`
 
