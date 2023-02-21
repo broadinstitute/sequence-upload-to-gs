@@ -126,6 +126,9 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
     done
     
     while true; do
+        sync # flush write buffers to disk
+        sleep 15 # pause for disk writes
+        
         current_time=$(date +%s)
 
         if [ "$(uname)" != "Darwin" ]; then
