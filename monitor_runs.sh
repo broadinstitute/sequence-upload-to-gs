@@ -96,7 +96,7 @@ while true; do
                   upload_cmd="${SCRIPTPATH}/incremental_illumina_upload_to_gs.sh ${found_dir} ${DESTINATION_BUCKET_PREFIX}"
                   echo "    ${upload_cmd}"
                   # fork incremental upload to separate process
-                  (STAGING_AREA_PATH="${STAGING_AREA_PATH}" ${upload_cmd}) &
+                  (STAGING_AREA_PATH="${STAGING_AREA_PATH}" ${upload_cmd} >> ${STAGING_AREA_PATH}/${RUN_BASENAME}_upload.log ) &
                 else
                     echo "Skipping initiation of new upload (upload in progress): ${STAGING_AREA_PATH}/${RUN_BASENAME}"
                 fi
