@@ -77,6 +77,9 @@ echo "Location for temp files: ${STAGING_AREA_PATH}"
 # detect if running via cron, and only run infinitely if not running via cron
 CRON="$( pstree -s $$ | grep -c cron )"
 while true; do
+    echo ""
+    echo "==="
+    echo "$(date +%Y-%m-%dT%H:%M)"
     echo "Checking for new run directories in: ${PATH_TO_MONITOR}"
     for found_dir in $(find "${PATH_TO_MONITOR}" -maxdepth 2 -type f -name '*RunInfo.xml' -exec dirname {} \; | sort -u); do
         found_dir="$(realpath "$found_dir")"
