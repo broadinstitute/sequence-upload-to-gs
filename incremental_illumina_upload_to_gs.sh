@@ -159,7 +159,7 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
             # '--no-check-device' is for NFS
             # '-C "${PATH_TO_UPLOAD}" .' so we don't store the full path (-C is cd)
             if [[ "$SOURCE_PATH_IS_ON_NFS" == "true" ]]; then SHOULD_CHECK_DEVICE_STR="--no-check-device"; else SHOULD_CHECK_DEVICE_STR=""; fi
-            $TAR_BIN --exclude='Thumbnail_Images' --exclude="Images" --exclude "FocusModelGeneration" \
+                $TAR_BIN --exclude='Thumbnail_Images' --exclude="Images" --exclude "FocusModelGeneration" --exclude='Autocenter' --exclude='InstrumentAnalyticsLogs' --exclude "Logs" \
                 --create \
                 --gzip \
                 $SHOULD_CHECK_DEVICE_STR \
