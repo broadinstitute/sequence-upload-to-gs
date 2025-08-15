@@ -161,8 +161,9 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
             # '--blocking-factor=1' prevents extra zero-padding blocks for efficient concatenation
             # '--sparse' consolidates runs of zeros in input files
             # '--label' adds human-readable note with run ID
-            # 'head --bytes -1024' trims EOF blocks (two 512-byte blocks) before gzip compression
+            # 'head --bytes -1024' trims EOF blocks for incremental tarballs; final tarball preserves EOF blocks
             if [[ "$SOURCE_PATH_IS_ON_NFS" == "true" ]]; then SHOULD_CHECK_DEVICE_STR="--no-check-device"; else SHOULD_CHECK_DEVICE_STR=""; fi
+            if [[ "$run_is_finished" == 'true' ]]; then EOF_PROCESSOR="cat"; else EOF_PROCESSOR="head --bytes -1024"; fi
                 $TAR_BIN --exclude='Thumbnail_Images' --exclude="Images" --exclude "FocusModelGeneration" --exclude='Autocenter' --exclude='InstrumentAnalyticsLogs' --exclude "Logs" \
                 --create \
                 --blocking-factor=1 \
@@ -170,7 +171,7 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
                 --label="${RUN_BASENAME}" \
                 $SHOULD_CHECK_DEVICE_STR \
                 --listed-incremental="${STAGING_AREA_PATH}/${RUN_BASENAME}/index" \
-                -C "${PATH_TO_UPLOAD}" . | head --bytes -1024 | gzip > "${STAGING_AREA_PATH}/${RUN_BASENAME}/${timestamp}_part-1.tar.gz"
+                -C "${PATH_TO_UPLOAD}" . | $EOF_PROCESSOR | gzip > "${STAGING_AREA_PATH}/${RUN_BASENAME}/${timestamp}_part-1.tar.gz"
 
             # -------------------------------------------------------------------------
             # # (WIP alternative to the above tar call)
