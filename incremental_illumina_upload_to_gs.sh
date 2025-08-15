@@ -6,7 +6,7 @@
 # depends on:
 # GNU tar (separate install on mac)
 # google-cloud-sdk
-# IMPORTANT: resulting tarball must be extracted with GNU tar and "--ignore-zeros" specified
+# Uses optimized tar settings (--blocking-factor=1, --sparse, EOF trimming) for efficient concatenation
 
 if [[ "$#" -ne 2 ]]; then
     echo "--------------------------------------------------------------------"
@@ -21,8 +21,8 @@ if [[ "$#" -ne 2 ]]; then
     echo ""
     echo ""
     echo "This script creates incremental gzipped tarballs and syncs them"
-    echo "to a single tarball in a GS bucket. The resulting tarballs must be"
-    echo "extracted with GNU tar or compatible with '--ignore-zeros' specifed."
+    echo "to a single tarball in a GS bucket. The tarballs use optimized"
+    echo "tar settings for efficient concatenation and standard extraction."
     echo ""
     echo "Dependencies: GNU tar, google-cloud-sdk (with crcmod installed)"
     echo ""
@@ -157,15 +157,20 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
             # see: https://www.gnu.org/software/tar/manual/html_node/Incremental-Dumps.html
             #      https://www.gnu.org/software/tar/manual/html_node/Snapshot-Files.html
             # '--no-check-device' is for NFS
-            # '-C "${PATH_TO_UPLOAD}" .' so we don't store the full path (-C is cd)
+            # '-C "${PATH_TO_UPLOAD}" ." so we don't store the full path (-C is cd)
+            # '--blocking-factor=1' prevents extra zero-padding blocks for efficient concatenation
+            # '--sparse' consolidates runs of zeros in input files
+            # '--label' adds human-readable note with run ID
+            # 'head --bytes -1024' trims EOF blocks (two 512-byte blocks) before gzip compression
             if [[ "$SOURCE_PATH_IS_ON_NFS" == "true" ]]; then SHOULD_CHECK_DEVICE_STR="--no-check-device"; else SHOULD_CHECK_DEVICE_STR=""; fi
                 $TAR_BIN --exclude='Thumbnail_Images' --exclude="Images" --exclude "FocusModelGeneration" --exclude='Autocenter' --exclude='InstrumentAnalyticsLogs' --exclude "Logs" \
                 --create \
-                --gzip \
+                --blocking-factor=1 \
+                --sparse \
+                --label="${RUN_BASENAME}" \
                 $SHOULD_CHECK_DEVICE_STR \
-                --file="${STAGING_AREA_PATH}/${RUN_BASENAME}/${timestamp}_part-1.tar.gz" \
                 --listed-incremental="${STAGING_AREA_PATH}/${RUN_BASENAME}/index" \
-                -C "${PATH_TO_UPLOAD}" .
+                -C "${PATH_TO_UPLOAD}" . | head --bytes -1024 | gzip > "${STAGING_AREA_PATH}/${RUN_BASENAME}/${timestamp}_part-1.tar.gz"
 
             # -------------------------------------------------------------------------
             # # (WIP alternative to the above tar call)
@@ -250,7 +255,7 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
     done
 
     # create a note about the tarball
-    echo "$RUN_BASENAME.tar.gz must be unpacked with GNU tar and '--ignore-zeros' specified." | gsutil cp - "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/$RUN_BASENAME.tar.gz.README.txt"
+    echo "$RUN_BASENAME.tar.gz created using optimized tar settings for efficient concatenation. Can be extracted with standard tar commands." | gsutil cp - "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/$RUN_BASENAME.tar.gz.README.txt"
 
     # if only the index file is present, remove it
     if [[ $(ls -1 "${STAGING_AREA_PATH}/${RUN_BASENAME}" | wc -l) -eq 1 ]]; then
