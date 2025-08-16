@@ -91,7 +91,8 @@ while true; do
             echo "Path is new enough to attempt an upload: ${found_dir}"
             RUN_BASENAME="$(basename ${found_dir})"
             # if the run does not already exist on the destination, commence upload process...
-            RUN_BUCKET_PATH="${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.tar.gz"
+            # Define the final tarball path to match the pattern used in incremental script
+            RUN_BUCKET_PATH="${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/${RUN_BASENAME}.tar.gz"
             if ! $GCLOUD_STORAGE_CMD ls "${RUN_BUCKET_PATH}" &> /dev/null; then
                 echo "Run does not exist in bucket:            ${RUN_BUCKET_PATH}"
                 if ! [ -d "${STAGING_AREA_PATH}/${RUN_BASENAME}" ]; then

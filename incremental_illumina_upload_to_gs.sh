@@ -304,11 +304,14 @@ generate_verbose_metadata() {
 EOF
 }
 
+# Define the final tarball path once to avoid repetition
+FINAL_TARBALL_PATH="${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/${RUN_BASENAME}.tar.gz"
+
 # if the run does not already exist on the destination, commence upload process...
-if ! $GCLOUD_STORAGE_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.tar.gz" &> /dev/null; then
+if ! $GCLOUD_STORAGE_CMD ls "$FINAL_TARBALL_PATH" &> /dev/null; then
     START_TIME=$(date +%s)
 
-    echo "Does not already exist in bucket: ${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.tar.gz"
+    echo "Does not already exist in bucket: $FINAL_TARBALL_PATH"
 
     # quit if the run is stale based on mtime of RunInfo.xml
     if [ "$(uname)" != "Darwin" ]; then
@@ -455,11 +458,11 @@ if ! $GCLOUD_STORAGE_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BA
     done
 
     # make sure the composed tarball does not exist on GS; if it does not...
-    if ! $GCLOUD_STORAGE_CMD ls "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/${RUN_BASENAME}.tar.gz"; then
+    if ! $GCLOUD_STORAGE_CMD ls "$FINAL_TARBALL_PATH"; then
         # get the archive started with a blank file
         dummyfile="${STAGING_AREA_PATH}/${RUN_BASENAME}/dummyfile.tar.gz"
         touch $dummyfile
-        $GCLOUD_STORAGE_CMD cp "${dummyfile}" "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/$RUN_BASENAME.tar.gz"
+        $GCLOUD_STORAGE_CMD cp "${dummyfile}" "$FINAL_TARBALL_PATH"
         rm "${dummyfile}"
     fi
 
@@ -472,14 +475,14 @@ if ! $GCLOUD_STORAGE_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BA
     until [[ "$($GCLOUD_STORAGE_CMD du ${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/parts/'*.tar.gz' 2> /dev/null | wc -l | awk '{print $1}' || echo '0')" == "0" ]]; do
         first_files=$($GCLOUD_STORAGE_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/parts/"'*.tar.gz' | sort -V | head -n 31 | tr '\n' ' ')
         if [ ${#first_files} -ge 0 ]; then
-            $GCLOUD_STORAGE_CMD objects compose "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/$RUN_BASENAME.tar.gz" \
+            $GCLOUD_STORAGE_CMD objects compose "$FINAL_TARBALL_PATH" \
                 ${first_files} \
-                "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/$RUN_BASENAME.tar.gz" && sleep 10 && $GCLOUD_STORAGE_CMD rm ${first_files}
+                "$FINAL_TARBALL_PATH" && sleep 10 && $GCLOUD_STORAGE_CMD rm ${first_files}
         fi
     done
 
     # create a note about the tarball
-    echo "$RUN_BASENAME.tar.gz created using optimized tar settings for efficient concatenation. Can be extracted with standard tar commands." | $GCLOUD_STORAGE_CMD cp - "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/$RUN_BASENAME.tar.gz.README.txt"
+    echo "$RUN_BASENAME.tar.gz created using optimized tar settings for efficient concatenation. Can be extracted with standard tar commands. The $RUN_BASENAME.terra.tsv file can be used to add a row for this tarball to a table on Terra." | $GCLOUD_STORAGE_CMD cp - "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/$RUN_BASENAME.tar.gz.README.txt"
     
     # create and upload verbose metadata JSON file
     generate_verbose_metadata "$RUN_BASENAME" "$PATH_TO_UPLOAD" "$DESTINATION_BUCKET_PREFIX" "$START_TIME" | $GCLOUD_STORAGE_CMD cp - "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/$RUN_BASENAME.upload_metadata.json"
@@ -492,6 +495,6 @@ if ! $GCLOUD_STORAGE_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BA
     # if staging dir is empty, remove it (rmdir only does this if empty).
     rmdir "${STAGING_AREA_PATH}/${RUN_BASENAME}" &> /dev/null
 else
-    echo "Exiting; already exists: ${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.tar.gz"
+    echo "Exiting; already exists: $FINAL_TARBALL_PATH"
     exit 0
 fi
