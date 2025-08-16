@@ -6,7 +6,7 @@
 # depends on:
 # google-cloud-sdk
 # pstree (separate install on mac, 'brew install pstree')
-# IMPORTANT: resulting tarball must be extracted with GNU tar and "--ignore-zeros" specified
+# Uses optimized tar settings (--blocking-factor=1, --sparse, EOF trimming) for efficient concatenation
 
 if [[ "$#" -ne 2 ]]; then
     echo "--------------------------------------------------------------------"
@@ -29,6 +29,46 @@ if [[ "$#" -ne 2 ]]; then
 fi
 
 set -x
+
+# -------------------------------
+# Dependency checking
+# -------------------------------
+
+# Hard dependencies - script will exit if any are missing
+MONITOR_DEPENDENCIES=(gcloud find sort realpath basename grep ps)
+
+echo "Checking required dependencies for monitor script..."
+missing_deps=()
+for dependency in "${MONITOR_DEPENDENCIES[@]}"; do
+    if ! command -v "$dependency" &> /dev/null; then
+        missing_deps+=("$dependency")
+    fi
+done
+
+if [[ ${#missing_deps[@]} -gt 0 ]]; then
+    echo "ERROR! Missing required dependencies. Aborting..."
+    echo "The following commands need to be installed and available on PATH:"
+    for dep in "${missing_deps[@]}"; do
+        echo "  - $dep"
+    done
+    echo ""
+    echo "Please install the missing dependencies and try again."
+    exit 1
+fi
+
+# Check for optional pstree (preferred for cron detection)
+if command -v pstree &> /dev/null; then
+    echo "Using pstree for cron detection."
+    CRON_DETECTION_METHOD="pstree"
+else
+    echo "pstree not available, using ps fallback for cron detection."
+    CRON_DETECTION_METHOD="ps"
+fi
+
+echo "All required dependencies satisfied for monitor script."
+echo ""
+
+# -------------------------------
 
 function absolute_path() {
     local SOURCE="$1"
@@ -63,19 +103,55 @@ PATH_TO_MONITOR="$(realpath ${PATH_TO_MONITOR})"
 DESTINATION_BUCKET_PREFIX="$2"
 
 INCLUSION_TIME_INTERVAL_DAYS=${INCLUSION_TIME_INTERVAL_DAYS:-'7'}
-DELAY_BETWEEN_INCREMENTS_SEC=${DELAY_BETWEEN_INCREMENTS_SEC:-'10'}
+DELAY_BETWEEN_INCREMENTS_SEC=${DELAY_BETWEEN_INCREMENTS_SEC:-'600'}
 STAGING_AREA_PATH="${STAGING_AREA_PATH:-$DEFAULT_STAGING_AREA}"
 
-GSUTIL_CMD='gsutil'
+GCLOUD_STORAGE_CMD='gcloud storage'
 if [ "$(uname)" == "Darwin" ]; then
     #export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=true # workaround for https://bugs.python.org/issue33725
-    GSUTIL_CMD='gsutil -o "GSUtil:parallel_process_count=1"'
+    # Note: gcloud storage handles parallelization automatically, no manual tuning needed
+    GCLOUD_STORAGE_CMD='gcloud storage'
 fi
 
 echo "Location for temp files: ${STAGING_AREA_PATH}"
 
 # detect if running via cron, and only run infinitely if not running via cron
-CRON="$( pstree -s $$ | grep -c cron )"
+if [[ "$CRON_DETECTION_METHOD" == "pstree" ]]; then
+    if pstree -s $$ 2>/dev/null | grep -q cron 2>/dev/null; then
+        CRON=1
+    else
+        CRON=0
+    fi
+else
+    # Fallback using ps - works on both GNU/Linux and macOS/BSD
+    # Check if any parent process contains 'cron' in the command name
+    if [ "$(uname)" == "Darwin" ]; then
+        # macOS/BSD ps format - check current and parent processes
+        current_pid=$$
+        CRON=0
+        while [[ $current_pid -ne 1 ]]; do
+            if ps -o comm= -p $current_pid 2>/dev/null | grep -q cron; then
+                CRON=1
+                break
+            fi
+            parent_pid=$(ps -o ppid= -p $current_pid 2>/dev/null | tr -d ' ')
+            [[ -z "$parent_pid" || "$parent_pid" == "0" || "$parent_pid" == "1" ]] && break
+            current_pid=$parent_pid
+        done
+    else
+        # GNU/Linux ps format - trace up the process tree
+        current_pid=$$
+        CRON=0
+        while [[ $current_pid -ne 1 ]]; do
+            if ps -o comm= -p $current_pid 2>/dev/null | grep -q cron; then
+                CRON=1
+                break
+            fi
+            current_pid=$(ps -o ppid= -p $current_pid 2>/dev/null | tr -d ' ' || echo 1)
+            [[ -z "$current_pid" || "$current_pid" == "0" ]] && break
+        done
+    fi
+fi
 while true; do
     echo ""
     echo "==="
@@ -90,8 +166,9 @@ while true; do
             echo "Path is new enough to attempt an upload: ${found_dir}"
             RUN_BASENAME="$(basename ${found_dir})"
             # if the run does not already exist on the destination, commence upload process...
-            RUN_BUCKET_PATH="${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.tar.gz"
-            if ! $GSUTIL_CMD ls "${RUN_BUCKET_PATH}" &> /dev/null; then
+            # Define the final tarball path to match the pattern used in incremental script
+            RUN_BUCKET_PATH="${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/${RUN_BASENAME}.tar.gz"
+            if ! $GCLOUD_STORAGE_CMD ls "${RUN_BUCKET_PATH}" &> /dev/null; then
                 echo "Run does not exist in bucket:            ${RUN_BUCKET_PATH}"
                 if ! [ -d "${STAGING_AREA_PATH}/${RUN_BASENAME}" ]; then
                   echo "Run upload not yet in progress; no dir:  ${STAGING_AREA_PATH}/${RUN_BASENAME}"
@@ -99,7 +176,12 @@ while true; do
                   upload_cmd="${SCRIPTPATH}/incremental_illumina_upload_to_gs.sh ${found_dir} ${DESTINATION_BUCKET_PREFIX}"
                   echo "    ${upload_cmd}"
                   # fork incremental upload to separate process
-                  (STAGING_AREA_PATH="${STAGING_AREA_PATH}" ${upload_cmd}) &
+                  # pass cron detection info via environment variable
+                  if [[ $CRON -gt 0 ]]; then
+                      (STAGING_AREA_PATH="${STAGING_AREA_PATH}" CRON_INVOKED="true" ${upload_cmd}) &
+                  else
+                      (STAGING_AREA_PATH="${STAGING_AREA_PATH}" CRON_INVOKED="false" ${upload_cmd}) &
+                  fi
                 else
                     echo "Skipping initiation of new upload (upload in progress): ${STAGING_AREA_PATH}/${RUN_BASENAME}"
                 fi
