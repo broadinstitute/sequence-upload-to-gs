@@ -304,6 +304,18 @@ generate_verbose_metadata() {
 EOF
 }
 
+# Function to generate Terra-compatible TSV file for data table import
+generate_terra_tsv() {
+    local run_basename="$1"
+    local tarball_path="$2"
+    
+    # Create TSV with POSIX line endings (LF only)
+    cat << EOF
+entity:flowcell_id	biosample_attributes	flowcell_tar	samplesheets	sample_rename_map_tsv
+$run_basename		$tarball_path		
+EOF
+}
+
 # Define the final tarball path once to avoid repetition
 FINAL_TARBALL_PATH="${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/${RUN_BASENAME}.tar.gz"
 
@@ -486,6 +498,9 @@ if ! $GCLOUD_STORAGE_CMD ls "$FINAL_TARBALL_PATH" &> /dev/null; then
     
     # create and upload verbose metadata JSON file
     generate_verbose_metadata "$RUN_BASENAME" "$PATH_TO_UPLOAD" "$DESTINATION_BUCKET_PREFIX" "$START_TIME" | $GCLOUD_STORAGE_CMD cp - "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/$RUN_BASENAME.upload_metadata.json"
+    
+    # create and upload Terra-compatible TSV file
+    generate_terra_tsv "$RUN_BASENAME" "$FINAL_TARBALL_PATH" | $GCLOUD_STORAGE_CMD cp - "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/$RUN_BASENAME.terra.tsv"
 
     # if only the index file is present, remove it
     if [[ $(ls -1 "${STAGING_AREA_PATH}/${RUN_BASENAME}" | wc -l) -eq 1 ]]; then
