@@ -59,6 +59,7 @@ RUN_BASENAME="$(basename ${PATH_TO_UPLOAD})"
 STAGING_AREA_PATH="${STAGING_AREA_PATH:-$DEFAULT_STAGING_AREA}"
 RSYNC_RETRY_MAX_ATTEMPTS=${RSYNC_RETRY_MAX_ATTEMPTS:-"12"}
 RSYNC_RETRY_DELAY_SEC=${RSYNC_RETRY_DELAY_SEC:-"600"}
+TERRA_RUN_TABLE_NAME=${TERRA_RUN_TABLE_NAME:-"flowcell"}
 
 # -------------------------------
 
@@ -311,7 +312,7 @@ generate_terra_tsv() {
     
     # Create TSV with POSIX line endings (LF only)
     cat << EOF
-entity:flowcell_id	biosample_attributes	flowcell_tar	samplesheets	sample_rename_map_tsv
+entity:${TERRA_RUN_TABLE_NAME}_id	biosample_attributes	flowcell_tar	samplesheets	sample_rename_map_tsv
 $run_basename		$tarball_path		
 EOF
 }

@@ -35,6 +35,7 @@ Key configuration variables (with defaults):
 - `STAGING_AREA_PATH` - Location for temporary files (defaults to `/usr/local/illumina/seq-run-uploads` on Illumina machines, `/tmp/seq-run-uploads` elsewhere)
 - `RSYNC_RETRY_MAX_ATTEMPTS=12` - Maximum retry attempts for uploads
 - `INCLUSION_TIME_INTERVAL_DAYS=7` - Age limit for runs to be considered for upload
+- `TERRA_RUN_TABLE_NAME=flowcell` - Table name for Terra TSV file generation (creates `entity:{table_name}_id` column)
 
 ## Usage Patterns
 
