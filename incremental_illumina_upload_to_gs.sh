@@ -62,6 +62,82 @@ RSYNC_RETRY_DELAY_SEC=${RSYNC_RETRY_DELAY_SEC:-"600"}
 TERRA_RUN_TABLE_NAME=${TERRA_RUN_TABLE_NAME:-"flowcell"}
 
 # -------------------------------
+# Dependency checking
+# -------------------------------
+
+# Hard dependencies - script will exit if any are missing
+HARD_DEPENDENCIES=(gcloud tar date basename mkdir rm find head wc cut awk sort tr expr du uname realpath stat touch cat gzip base64 sed ls whoami hostname ps)
+
+# Optional dependencies - script will work without them but with reduced functionality
+OPTIONAL_DEPENDENCIES=(dig curl ip route grep pstree)
+
+# Check hard dependencies
+echo "Checking required dependencies..."
+missing_deps=()
+for dependency in "${HARD_DEPENDENCIES[@]}"; do
+    if ! command -v "$dependency" &> /dev/null; then
+        missing_deps+=("$dependency")
+    fi
+done
+
+if [[ ${#missing_deps[@]} -gt 0 ]]; then
+    echo "ERROR! Missing required dependencies. Aborting..."
+    echo "The following commands need to be installed and available on PATH:"
+    for dep in "${missing_deps[@]}"; do
+        echo "  - $dep"
+    done
+    echo ""
+    echo "Please install the missing dependencies and try again."
+    exit 1
+fi
+
+# Check and track optional dependencies
+echo "Checking optional dependencies..."
+available_optional_deps=()
+for dependency in "${OPTIONAL_DEPENDENCIES[@]}"; do
+    if command -v "$dependency" &> /dev/null; then
+        available_optional_deps+=("$dependency")
+    fi
+done
+
+if [[ ${#available_optional_deps[@]} -eq 0 ]]; then
+    echo "Warning: No optional tools available. Some features may have reduced functionality."
+else
+    echo "Available optional tools: ${available_optional_deps[*]}"
+    
+    # Check specific functionality
+    ip_tools=(dig curl ip route)
+    available_ip_tools=()
+    for tool in "${ip_tools[@]}"; do
+        if [[ " ${available_optional_deps[*]} " =~ " ${tool} " ]]; then
+            available_ip_tools+=("$tool")
+        fi
+    done
+    
+    if [[ ${#available_ip_tools[@]} -eq 0 ]]; then
+        echo "Warning: No external IP detection tools available. External IP will be set to 0.0.0.0"
+    fi
+    
+    if [[ " ${available_optional_deps[*]} " =~ " pstree " ]]; then
+        echo "Note: pstree available for enhanced cron detection"
+    else
+        echo "Note: Using ps fallback for cron detection (pstree not available)"
+    fi
+fi
+
+# Check for GNU tar specifically on macOS
+if [ "$(uname)" == "Darwin" ]; then
+    if ! command -v gtar &> /dev/null; then
+        echo "ERROR! macOS detected but GNU tar (gtar) is not available."
+        echo "Please install GNU tar: brew install gnu-tar"
+        exit 1
+    fi
+fi
+
+echo "All required dependencies satisfied."
+echo ""
+
+# -------------------------------
 
 function cleanup(){
     echo "Cleaning up archive; exit code: $?"
@@ -168,8 +244,44 @@ is_cron_execution() {
         return
     fi
     
-    # Detect based on environment characteristics
-    if [[ -z "$TERM" || "$TERM" == "dumb" ]] && [[ -z "$SSH_CLIENT" ]] && [[ -z "$SSH_TTY" ]]; then
+    # Use same cron detection logic as monitor_runs.sh
+    local cron_detected=0
+    if command -v pstree &> /dev/null; then
+        # Use pstree if available
+        if pstree -s $$ 2>/dev/null | grep -q cron 2>/dev/null; then
+            cron_detected=1
+        else
+            cron_detected=0
+        fi
+    else
+        # Fallback using ps - works on both GNU/Linux and macOS/BSD
+        if [ "$(uname)" == "Darwin" ]; then
+            # macOS/BSD ps format - check current and parent processes
+            local current_pid=$$
+            while [[ $current_pid -ne 1 ]]; do
+                if ps -o comm= -p $current_pid 2>/dev/null | grep -q cron; then
+                    cron_detected=1
+                    break
+                fi
+                local parent_pid=$(ps -o ppid= -p $current_pid 2>/dev/null | tr -d ' ')
+                [[ -z "$parent_pid" || "$parent_pid" == "0" || "$parent_pid" == "1" ]] && break
+                current_pid=$parent_pid
+            done
+        else
+            # GNU/Linux ps format - trace up the process tree
+            local current_pid=$$
+            while [[ $current_pid -ne 1 ]]; do
+                if ps -o comm= -p $current_pid 2>/dev/null | grep -q cron; then
+                    cron_detected=1
+                    break
+                fi
+                current_pid=$(ps -o ppid= -p $current_pid 2>/dev/null | tr -d ' ' || echo 1)
+                [[ -z "$current_pid" || "$current_pid" == "0" ]] && break
+            done
+        fi
+    fi
+    
+    if [[ $cron_detected -gt 0 ]]; then
         echo "true"
     else
         echo "false"

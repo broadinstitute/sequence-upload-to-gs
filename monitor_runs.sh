@@ -30,6 +30,46 @@ fi
 
 set -x
 
+# -------------------------------
+# Dependency checking
+# -------------------------------
+
+# Hard dependencies - script will exit if any are missing
+MONITOR_DEPENDENCIES=(gcloud find sort realpath basename grep ps)
+
+echo "Checking required dependencies for monitor script..."
+missing_deps=()
+for dependency in "${MONITOR_DEPENDENCIES[@]}"; do
+    if ! command -v "$dependency" &> /dev/null; then
+        missing_deps+=("$dependency")
+    fi
+done
+
+if [[ ${#missing_deps[@]} -gt 0 ]]; then
+    echo "ERROR! Missing required dependencies. Aborting..."
+    echo "The following commands need to be installed and available on PATH:"
+    for dep in "${missing_deps[@]}"; do
+        echo "  - $dep"
+    done
+    echo ""
+    echo "Please install the missing dependencies and try again."
+    exit 1
+fi
+
+# Check for optional pstree (preferred for cron detection)
+if command -v pstree &> /dev/null; then
+    echo "Using pstree for cron detection."
+    CRON_DETECTION_METHOD="pstree"
+else
+    echo "pstree not available, using ps fallback for cron detection."
+    CRON_DETECTION_METHOD="ps"
+fi
+
+echo "All required dependencies satisfied for monitor script."
+echo ""
+
+# -------------------------------
+
 function absolute_path() {
     local SOURCE="$1"
     while [ -h "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
@@ -76,7 +116,42 @@ fi
 echo "Location for temp files: ${STAGING_AREA_PATH}"
 
 # detect if running via cron, and only run infinitely if not running via cron
-CRON="$( pstree -s $$ | grep -c cron )"
+if [[ "$CRON_DETECTION_METHOD" == "pstree" ]]; then
+    if pstree -s $$ 2>/dev/null | grep -q cron 2>/dev/null; then
+        CRON=1
+    else
+        CRON=0
+    fi
+else
+    # Fallback using ps - works on both GNU/Linux and macOS/BSD
+    # Check if any parent process contains 'cron' in the command name
+    if [ "$(uname)" == "Darwin" ]; then
+        # macOS/BSD ps format - check current and parent processes
+        current_pid=$$
+        CRON=0
+        while [[ $current_pid -ne 1 ]]; do
+            if ps -o comm= -p $current_pid 2>/dev/null | grep -q cron; then
+                CRON=1
+                break
+            fi
+            parent_pid=$(ps -o ppid= -p $current_pid 2>/dev/null | tr -d ' ')
+            [[ -z "$parent_pid" || "$parent_pid" == "0" || "$parent_pid" == "1" ]] && break
+            current_pid=$parent_pid
+        done
+    else
+        # GNU/Linux ps format - trace up the process tree
+        current_pid=$$
+        CRON=0
+        while [[ $current_pid -ne 1 ]]; do
+            if ps -o comm= -p $current_pid 2>/dev/null | grep -q cron; then
+                CRON=1
+                break
+            fi
+            current_pid=$(ps -o ppid= -p $current_pid 2>/dev/null | tr -d ' ' || echo 1)
+            [[ -z "$current_pid" || "$current_pid" == "0" ]] && break
+        done
+    fi
+fi
 while true; do
     echo ""
     echo "==="
