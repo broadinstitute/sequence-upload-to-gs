@@ -477,6 +477,12 @@ generate_dynamic_exclusions() {
             echo "$relative_file" >> "$exclusions_file"
         done
         
+        # Sort and deduplicate exclusions (files may match both recent cycle and recent time criteria)
+        if [[ -f "$exclusions_file" && -s "$exclusions_file" ]]; then
+            local temp_file="${exclusions_file}.tmp"
+            sort -u "$exclusions_file" > "$temp_file" && mv "$temp_file" "$exclusions_file"
+        fi
+        
         # Show exclusions count for logging
         local exclusion_count=$(wc -l < "$exclusions_file" 2>/dev/null || echo 0)
         if [[ $exclusion_count -gt 0 ]]; then
