@@ -5,7 +5,8 @@
       "Bash(git fetch:*)",
       "WebFetch(domain:www.gnu.org)",
       "WebSearch",
-      "WebFetch(domain:man7.org)"
+      "WebFetch(domain:man7.org)",
+      "Bash(gh issue view:*)"
     ],
     "deny": [],
     "ask": []

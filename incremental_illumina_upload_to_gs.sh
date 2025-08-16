@@ -438,6 +438,60 @@ $run_basename		$tarball_path
 EOF
 }
 
+# Function to generate dynamic exclusions for incomplete cycles and recently modified files
+# Only generates exclusions when run is not finished to prevent tarball bloat from partial *.cbcl files
+generate_dynamic_exclusions() {
+    local run_path="$1"
+    local exclusions_file="$2"
+    local run_is_finished="$3"
+    
+    # Only generate exclusions if run is not finished
+    if [[ "$run_is_finished" != 'true' ]]; then
+        # Clear the exclusions file
+        > "$exclusions_file"
+        
+        # Find and exclude the most recent cycle directory to prevent capturing partial *.cbcl files
+        # Look for pattern: Data/Intensities/BaseCalls/L00*/C###.# (cycle directories)
+        if [[ -d "${run_path}/Data/Intensities/BaseCalls" ]]; then
+            local most_recent_cycle=$(find "${run_path}/Data/Intensities/BaseCalls/"L* \
+                -type d \
+                -regextype posix-extended \
+                -regex '^.+/C[0-9]+\.[0-9]+$' 2>/dev/null | \
+                sort -r -k1,1 -V | \
+                head -n1 | \
+                sed -E 's|(BaseCalls/)L([0-9]+)|\\1L*|g' 2>/dev/null || true)
+            
+            if [[ -n "$most_recent_cycle" ]]; then
+                # Convert absolute path to relative path for tar exclusion
+                local relative_cycle_path="${most_recent_cycle#${run_path}/}"
+                echo "$relative_cycle_path" >> "$exclusions_file"
+                echo "Dynamic exclusion: $relative_cycle_path (most recent cycle)"
+            fi
+        fi
+        
+        # Add files that have been modified in the past 3 minutes (optional, but recommended)
+        # This helps avoid capturing files that are actively being written
+        find "$run_path" -mmin -3 -type f 2>/dev/null | while IFS= read -r recent_file; do
+            # Convert to relative path for tar exclusion
+            local relative_file="${recent_file#${run_path}/}"
+            echo "$relative_file" >> "$exclusions_file"
+        done
+        
+        # Show exclusions count for logging
+        local exclusion_count=$(wc -l < "$exclusions_file" 2>/dev/null || echo 0)
+        if [[ $exclusion_count -gt 0 ]]; then
+            echo "Generated $exclusion_count dynamic exclusions to prevent capturing incomplete files"
+        fi
+        
+        return 0
+    else
+        echo "Run is finished - no dynamic exclusions applied"
+        # Ensure exclusions file doesn't exist for finished runs
+        [[ -f "$exclusions_file" ]] && rm "$exclusions_file"
+        return 1
+    fi
+}
+
 # Define the final tarball path once to avoid repetition
 FINAL_TARBALL_PATH="${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/${RUN_BASENAME}.tar.gz"
 
@@ -515,6 +569,17 @@ if ! $GCLOUD_STORAGE_CMD ls "$FINAL_TARBALL_PATH" &> /dev/null; then
             # generate enhanced tar label with metadata
             tar_label=$(generate_tar_label "$RUN_BASENAME" "$tar_increment_counter")
 
+            # Generate dynamic exclusions to prevent tarball bloat from partial *.cbcl files
+            EXCLUSIONS_FILE="${STAGING_AREA_PATH}/${RUN_BASENAME}/dynamic_exclusions.txt"
+            generate_dynamic_exclusions "$PATH_TO_UPLOAD" "$EXCLUSIONS_FILE" "$run_is_finished"
+            
+            # If this is the final tarball for a completed run, sync and wait to ensure all writes are flushed
+            if [[ "$run_is_finished" == 'true' ]]; then
+                echo "Run completed - performing final sync and wait before capturing final tarball"
+                sync
+                sleep 10  # Wait 10 seconds to ensure all file writes are fully committed
+            fi
+
             # increate incremental tarballs
             # see: https://www.gnu.org/software/tar/manual/html_node/Incremental-Dumps.html
             #      https://www.gnu.org/software/tar/manual/html_node/Snapshot-Files.html
@@ -523,6 +588,7 @@ if ! $GCLOUD_STORAGE_CMD ls "$FINAL_TARBALL_PATH" &> /dev/null; then
             # '--blocking-factor=1' prevents extra zero-padding blocks for efficient concatenation
             # '--sparse' consolidates runs of zeros in input files
             # '--label' adds enhanced metadata (JSON or pipe-separated format within 99-byte tar limit)
+            # '--exclude-from' excludes patterns from file to prevent capturing incomplete *.cbcl files
             # 'head --bytes -1024' trims EOF blocks for incremental tarballs; final tarball preserves EOF blocks
             if [[ "$SOURCE_PATH_IS_ON_NFS" == "true" ]]; then SHOULD_CHECK_DEVICE_STR="--no-check-device"; else SHOULD_CHECK_DEVICE_STR=""; fi
             if [[ "$run_is_finished" == 'true' ]]; then EOF_PROCESSOR="cat"; else EOF_PROCESSOR="head --bytes -1024"; fi
@@ -535,6 +601,7 @@ if ! $GCLOUD_STORAGE_CMD ls "$FINAL_TARBALL_PATH" &> /dev/null; then
             done
             
                 $TAR_BIN "${STATIC_EXCLUSIONS[@]}" \
+                $EXCLUSION_STR \
                 --create \
                 --blocking-factor=1 \
                 --sparse \

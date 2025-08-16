@@ -30,12 +30,13 @@ Required tools that must be available:
 
 Key configuration variables (with defaults):
 - `CHUNK_SIZE_MB=100` - Size of incremental tar chunks
-- `DELAY_BETWEEN_INCREMENTS_SEC=30` - Wait time between upload attempts
+- `DELAY_BETWEEN_INCREMENTS_SEC=600` - Wait time between upload attempts (optimized to reduce tarball bloat from partial *.cbcl files)
 - `RUN_COMPLETION_TIMEOUT_DAYS=16` - Max time to wait for run completion
 - `STAGING_AREA_PATH` - Location for temporary files (defaults to `/usr/local/illumina/seq-run-uploads` on Illumina machines, `/tmp/seq-run-uploads` elsewhere)
 - `RSYNC_RETRY_MAX_ATTEMPTS=12` - Maximum retry attempts for uploads
 - `INCLUSION_TIME_INTERVAL_DAYS=7` - Age limit for runs to be considered for upload
 - `TERRA_RUN_TABLE_NAME=flowcell` - Table name for Terra TSV file generation (creates `entity:{table_name}_id` column)
+- `TAR_EXCLUSIONS` - Space-separated list of directories to exclude from tar archives (defaults to: "Thumbnail_Images Images FocusModelGeneration Autocenter InstrumentAnalyticsLogs Logs")
 
 ## Usage Patterns
 
@@ -56,7 +57,8 @@ Key configuration variables (with defaults):
 
 ## Important Implementation Details
 
-- **Excluded Directories**: The upload excludes large non-essential directories: `Thumbnail_Images`, `Images`, `FocusModelGeneration`, `Autocenter`, `InstrumentAnalyticsLogs`, `Logs`
+- **Excluded Directories**: The upload excludes large non-essential directories (configurable via `TAR_EXCLUSIONS` environment variable, defaults to: `Thumbnail_Images`, `Images`, `FocusModelGeneration`, `Autocenter`, `InstrumentAnalyticsLogs`, `Logs`)
+- **Dynamic Exclusions**: During active sequencing, automatically excludes the most recent cycle directory and recently modified files (within 3 minutes) to prevent tarball bloat from partial `*.cbcl` files. Exclusions are disabled for the final tarball when `RTAComplete.txt`/`RTAComplete.xml` is detected.
 - **Individual Files**: `SampleSheet.csv` and `RunInfo.xml` are uploaded separately before tarball creation
 - **Run Completion Detection**: Looks for `RTAComplete.txt` or `RTAComplete.xml` files
 - **Tarball Extraction**: Resulting tarballs must be extracted with GNU tar using `--ignore-zeros`
