@@ -28,7 +28,7 @@ if [[ "$#" -ne 2 ]]; then
     echo "individual chunk labels, or 'tar -tvf combined.tar.gz | grep Volume'"
     echo "to see all labels in the final composed archive."
     echo ""
-    echo "Dependencies: GNU tar, google-cloud-sdk (with crcmod installed)"
+    echo "Dependencies: GNU tar, google-cloud-sdk (gcloud CLI with storage commands)"
     echo ""
     echo "Usage: $(basename $0) /path/of/run_to_upload gs://bucket-prefix"
     echo "--------------------------------------------------------------------"
@@ -80,15 +80,16 @@ size_at_last_check=0
 tar_increment_counter=0
 
 TAR_BIN="tar"
-GSUTIL_CMD='gsutil'
+GCLOUD_STORAGE_CMD='gcloud storage'
 if [ "$(uname)" == "Darwin" ]; then
     TAR_BIN="gtar" # GNU tar must be installed and available on the path as gtar
 
     #export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=true # workaround for https://bugs.python.org/issue33725
-    GSUTIL_CMD='gsutil -o "GSUtil:parallel_process_count=1"'
+    # Note: gcloud storage handles parallelization automatically, no manual tuning needed
+    GCLOUD_STORAGE_CMD='gcloud storage'
 fi
 
-$GSUTIL_CMD version -l
+gcloud version
 
 # Function to detect external IP address using multiple methods
 get_external_ip() {
@@ -237,8 +238,12 @@ generate_verbose_metadata() {
     local upload_duration=$((current_time - start_time))
     
     # Get executable versions
-    local gsutil_version=$(gsutil version 2>/dev/null | head -1 | awk '{print $3}' || echo "unknown")
-    local gcloud_version=$(gcloud version --format="value(Google Cloud SDK)" 2>/dev/null || echo "unknown")
+    local gcloud_version=$(gcloud version --format='value("Google Cloud SDK")' 2>/dev/null || echo "unknown")
+    local gcloud_storage_version=$(gcloud components list --filter="id:gcloud-storage" --format="value(version.string)" 2>/dev/null)
+    # If gcloud storage version is empty (bundled), fall back to main gcloud version
+    if [[ -z "$gcloud_storage_version" ]]; then
+        gcloud_storage_version="$gcloud_version"
+    fi
     local tar_version=$($TAR_BIN --version 2>/dev/null | head -1 || echo "unknown")
     local bash_version=$($BASH --version 2>/dev/null | head -1 || echo "$BASH_VERSION")
     
@@ -275,8 +280,8 @@ generate_verbose_metadata() {
     "script_version": "$script_version"
   },
   "tool_versions": {
-    "gsutil_version": "$gsutil_version",
     "gcloud_version": "$gcloud_version",
+    "gcloud_storage_version": "$gcloud_storage_version", 
     "tar_version": "$tar_version",
     "bash_version": "$bash_version"
   },
@@ -300,7 +305,7 @@ EOF
 }
 
 # if the run does not already exist on the destination, commence upload process...
-if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.tar.gz" &> /dev/null; then
+if ! $GCLOUD_STORAGE_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.tar.gz" &> /dev/null; then
     START_TIME=$(date +%s)
 
     echo "Does not already exist in bucket: ${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.tar.gz"
@@ -331,8 +336,8 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
             file_basename="$(basename ${filename})"
             file_extension="${file_basename#*.}"
             file_basename_no_ext="${file_basename%%.*}"
-            if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/${RUN_BASENAME}_${file_basename}" &> /dev/null; then
-                $GSUTIL_CMD cp "${PATH_TO_UPLOAD}/${filename}" "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/${RUN_BASENAME}_${file_basename}"
+            if ! $GCLOUD_STORAGE_CMD ls "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/${RUN_BASENAME}_${file_basename}" &> /dev/null; then
+                $GCLOUD_STORAGE_CMD cp "${PATH_TO_UPLOAD}/${filename}" "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/${RUN_BASENAME}_${file_basename}"
             else
                 echo "Already exists in bucket; skipping upload: ${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/${RUN_BASENAME}_${file_basename}"
             fi
@@ -414,17 +419,15 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
             # try (and retry) to rsync incremental tarballs to bucket
             retry_count=0
             until [ "$retry_count" -ge $RSYNC_RETRY_MAX_ATTEMPTS ]; do
-                # -m parallel uploads
-                # -c Causes the rsync command to compute and compare checksums
+                # --checksums-only: Causes the rsync command to compute and compare checksums
                 #    (instead of comparing mtime) for files if the size of source
-                #    and destination match.
-                # -C If an error occurs, continue to attempt to copy the remaining
-                #    files. If errors occurred, gsutil's exit status will be
-                #    non-zero even if this flag is set. This option is implicitly
-                #    set when running "gsutil -m rsync..." (included below in case '-m' is removed).
+                #    and destination match. (gcloud storage handles parallelization automatically)
+                # --continue-on-error: If an error occurs, continue to attempt to copy the remaining
+                #    files. If errors occurred, gcloud storage's exit status will be
+                #    non-zero even if this flag is set. gcloud storage handles parallelization automatically.
                 #
-                # see: https://cloud.google.com/storage/docs/gsutil/commands/rsync
-                $GSUTIL_CMD rsync -cC -x '.*index$' "${STAGING_AREA_PATH}/${RUN_BASENAME}/" "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/parts" && break
+                # see: https://cloud.google.com/sdk/gcloud/reference/storage/rsync
+                $GCLOUD_STORAGE_CMD rsync --checksums-only --continue-on-error --exclude='.*index$' "${STAGING_AREA_PATH}/${RUN_BASENAME}/" "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/parts" && break
                 retry_count=$((retry_count+1)) 
                 #sleep $RSYNC_RETRY_DELAY_SEC
                 sleep $(expr $RSYNC_RETRY_DELAY_SEC \* $retry_count) # each retry scale delay by a multiple of the count
@@ -435,8 +438,8 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
             for incremental_tarball in $(find "${STAGING_AREA_PATH}/${RUN_BASENAME}" -type f -name "*.tar.gz"); do
                 # if the local incremental tarball has indeed been synced
                 # remove the local copy of it...
-                if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/parts/$(basename ${incremental_tarball})"; then
-                    $GSUTIL_CMD cp "${incremental_tarball}" "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/parts/$(basename ${incremental_tarball})" && rm "${incremental_tarball}"
+                if ! $GCLOUD_STORAGE_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/parts/$(basename ${incremental_tarball})"; then
+                    $GCLOUD_STORAGE_CMD cp "${incremental_tarball}" "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/parts/$(basename ${incremental_tarball})" && rm "${incremental_tarball}"
                 else
                     rm "${incremental_tarball}"
                 fi
@@ -452,11 +455,11 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
     done
 
     # make sure the composed tarball does not exist on GS; if it does not...
-    if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/${RUN_BASENAME}.tar.gz"; then
+    if ! $GCLOUD_STORAGE_CMD ls "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/${RUN_BASENAME}.tar.gz"; then
         # get the archive started with a blank file
         dummyfile="${STAGING_AREA_PATH}/${RUN_BASENAME}/dummyfile.tar.gz"
         touch $dummyfile
-        $GSUTIL_CMD cp "${dummyfile}" "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/$RUN_BASENAME.tar.gz"
+        $GCLOUD_STORAGE_CMD cp "${dummyfile}" "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/$RUN_BASENAME.tar.gz"
         rm "${dummyfile}"
     fi
 
@@ -465,21 +468,21 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
     # append the first 31 incremental tarballs
     # to the main tarball, then remove the incremental tarballs
     # keep doing this until there are no more incremental tarballs
-    # see: https://cloud.google.com/storage/docs/gsutil/commands/compose
-    until [[ "$($GSUTIL_CMD du ${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/parts/'*.tar.gz' 2> /dev/null | wc -l | awk '{print $1}' || echo '0')" == "0" ]]; do
-        first_files=$($GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/parts/"'*.tar.gz' | sort -V | head -n 31 | tr '\n' ' ')
+    # see: https://cloud.google.com/storage/docs/composing-objects#create-composite-cli
+    until [[ "$($GCLOUD_STORAGE_CMD du ${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/parts/'*.tar.gz' 2> /dev/null | wc -l | awk '{print $1}' || echo '0')" == "0" ]]; do
+        first_files=$($GCLOUD_STORAGE_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/parts/"'*.tar.gz' | sort -V | head -n 31 | tr '\n' ' ')
         if [ ${#first_files} -ge 0 ]; then
-            $GSUTIL_CMD compose "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/$RUN_BASENAME.tar.gz" \
+            $GCLOUD_STORAGE_CMD objects compose "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/$RUN_BASENAME.tar.gz" \
                 ${first_files} \
-                "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/$RUN_BASENAME.tar.gz" && sleep 10 && $GSUTIL_CMD rm ${first_files}
+                "${DESTINATION_BUCKET_PREFIX}/${RUN_BASENAME}/$RUN_BASENAME.tar.gz" && sleep 10 && $GCLOUD_STORAGE_CMD rm ${first_files}
         fi
     done
 
     # create a note about the tarball
-    echo "$RUN_BASENAME.tar.gz created using optimized tar settings for efficient concatenation. Can be extracted with standard tar commands." | gsutil cp - "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/$RUN_BASENAME.tar.gz.README.txt"
+    echo "$RUN_BASENAME.tar.gz created using optimized tar settings for efficient concatenation. Can be extracted with standard tar commands." | $GCLOUD_STORAGE_CMD cp - "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/$RUN_BASENAME.tar.gz.README.txt"
     
     # create and upload verbose metadata JSON file
-    generate_verbose_metadata "$RUN_BASENAME" "$PATH_TO_UPLOAD" "$DESTINATION_BUCKET_PREFIX" "$START_TIME" | gsutil cp - "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/$RUN_BASENAME.upload_metadata.json"
+    generate_verbose_metadata "$RUN_BASENAME" "$PATH_TO_UPLOAD" "$DESTINATION_BUCKET_PREFIX" "$START_TIME" | $GCLOUD_STORAGE_CMD cp - "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/$RUN_BASENAME.upload_metadata.json"
 
     # if only the index file is present, remove it
     if [[ $(ls -1 "${STAGING_AREA_PATH}/${RUN_BASENAME}" | wc -l) -eq 1 ]]; then

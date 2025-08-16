@@ -66,10 +66,11 @@ INCLUSION_TIME_INTERVAL_DAYS=${INCLUSION_TIME_INTERVAL_DAYS:-'7'}
 DELAY_BETWEEN_INCREMENTS_SEC=${DELAY_BETWEEN_INCREMENTS_SEC:-'10'}
 STAGING_AREA_PATH="${STAGING_AREA_PATH:-$DEFAULT_STAGING_AREA}"
 
-GSUTIL_CMD='gsutil'
+GCLOUD_STORAGE_CMD='gcloud storage'
 if [ "$(uname)" == "Darwin" ]; then
     #export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=true # workaround for https://bugs.python.org/issue33725
-    GSUTIL_CMD='gsutil -o "GSUtil:parallel_process_count=1"'
+    # Note: gcloud storage handles parallelization automatically, no manual tuning needed
+    GCLOUD_STORAGE_CMD='gcloud storage'
 fi
 
 echo "Location for temp files: ${STAGING_AREA_PATH}"
@@ -91,7 +92,7 @@ while true; do
             RUN_BASENAME="$(basename ${found_dir})"
             # if the run does not already exist on the destination, commence upload process...
             RUN_BUCKET_PATH="${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.tar.gz"
-            if ! $GSUTIL_CMD ls "${RUN_BUCKET_PATH}" &> /dev/null; then
+            if ! $GCLOUD_STORAGE_CMD ls "${RUN_BUCKET_PATH}" &> /dev/null; then
                 echo "Run does not exist in bucket:            ${RUN_BUCKET_PATH}"
                 if ! [ -d "${STAGING_AREA_PATH}/${RUN_BASENAME}" ]; then
                   echo "Run upload not yet in progress; no dir:  ${STAGING_AREA_PATH}/${RUN_BASENAME}"

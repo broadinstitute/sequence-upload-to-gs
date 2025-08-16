@@ -3,7 +3,8 @@
     "allow": [
       "Bash(git checkout:*)",
       "Bash(git fetch:*)",
-      "WebFetch(domain:www.gnu.org)"
+      "WebFetch(domain:www.gnu.org)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []

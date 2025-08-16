@@ -16,13 +16,13 @@ This repository contains bash scripts for incremental upload of Illumina sequenc
 **Key Components:**
 - **Incremental Archiving**: Uses GNU tar with `--listed-incremental` to create incremental backups
 - **Chunked Uploads**: Splits large runs into manageable chunks (default 100MB) with retry logic
-- **GS Composition**: Uses `gsutil compose` to merge incremental tarballs into single archives
+- **GS Composition**: Uses `gcloud storage objects compose` to merge incremental tarballs into single archives
 - **Cross-platform Support**: Handles differences between Linux (Illumina sequencers) and macOS
 
 ## Dependencies
 
 Required tools that must be available:
-- `gsutil` (Google Cloud SDK)
+- `gcloud storage` (Google Cloud SDK)
 - `tar` (GNU tar, installed as `gtar` on macOS)
 - `pstree` (for monitoring script, installed via `brew install pstree` on macOS)
 
