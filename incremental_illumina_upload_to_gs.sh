@@ -53,13 +53,22 @@ else
 fi
 
 CHUNK_SIZE_MB=${CHUNK_SIZE_MB:-'100'}
-DELAY_BETWEEN_INCREMENTS_SEC=${DELAY_BETWEEN_INCREMENTS_SEC:-'30'}
+DELAY_BETWEEN_INCREMENTS_SEC=${DELAY_BETWEEN_INCREMENTS_SEC:-'600'}
 RUN_COMPLETION_TIMEOUT_DAYS=${RUN_COMPLETION_TIMEOUT_DAYS:-'16'}
 RUN_BASENAME="$(basename ${PATH_TO_UPLOAD})"
 STAGING_AREA_PATH="${STAGING_AREA_PATH:-$DEFAULT_STAGING_AREA}"
 RSYNC_RETRY_MAX_ATTEMPTS=${RSYNC_RETRY_MAX_ATTEMPTS:-"12"}
 RSYNC_RETRY_DELAY_SEC=${RSYNC_RETRY_DELAY_SEC:-"600"}
 TERRA_RUN_TABLE_NAME=${TERRA_RUN_TABLE_NAME:-"flowcell"}
+
+# Default directories to exclude from tar archives (large non-essential directories)
+DEFAULT_TAR_EXCLUSIONS=("Thumbnail_Images" "Images" "FocusModelGeneration" "Autocenter" "InstrumentAnalyticsLogs" "Logs")
+# Allow override via environment variable (space-separated list)
+if [[ -n "$TAR_EXCLUSIONS" ]]; then
+    IFS=' ' read -ra TAR_EXCLUSIONS_ARRAY <<< "$TAR_EXCLUSIONS"
+else
+    TAR_EXCLUSIONS_ARRAY=("${DEFAULT_TAR_EXCLUSIONS[@]}")
+fi
 
 # -------------------------------
 # Dependency checking
@@ -410,7 +419,7 @@ generate_verbose_metadata() {
     "blocking_factor": 1,
     "sparse_enabled": true,
     "eof_trimming": "incremental_only",
-    "excluded_directories": ["Thumbnail_Images", "Images", "FocusModelGeneration", "Autocenter", "InstrumentAnalyticsLogs", "Logs"]
+    "excluded_directories": [$(printf '"%s",' "${TAR_EXCLUSIONS_ARRAY[@]}" | sed 's/,$//')]
   },
   "generation_timestamp": "$timestamp_formatted"
 }
@@ -495,7 +504,7 @@ if ! $GCLOUD_STORAGE_CMD ls "$FINAL_TARBALL_PATH" &> /dev/null; then
         run_is_finished=$([ -e "${PATH_TO_UPLOAD}/RTAComplete.txt" ] || [ -e "${PATH_TO_UPLOAD}/RTAComplete.xml" ] && echo "true" || echo "false")
 
         # if enough additional data has been added, or the run is complete, initiate incremental upload
-        if [[ $current_size -ge $(($size_at_last_check + $chunk_size_bytes)) ]] || [ "$run_is_finished" = 'true' ]; then
+        if [[ $current_size -ge $(($size_at_last_check + $chunk_size_bytes)) || "$run_is_finished" == "true" ]]; then
             echo "commencing sync on latest data"
             size_at_last_check=$current_size
             timestamp=$(date +%s) # intentionally called before tar so time is a little older    
@@ -517,7 +526,15 @@ if ! $GCLOUD_STORAGE_CMD ls "$FINAL_TARBALL_PATH" &> /dev/null; then
             # 'head --bytes -1024' trims EOF blocks for incremental tarballs; final tarball preserves EOF blocks
             if [[ "$SOURCE_PATH_IS_ON_NFS" == "true" ]]; then SHOULD_CHECK_DEVICE_STR="--no-check-device"; else SHOULD_CHECK_DEVICE_STR=""; fi
             if [[ "$run_is_finished" == 'true' ]]; then EOF_PROCESSOR="cat"; else EOF_PROCESSOR="head --bytes -1024"; fi
-                $TAR_BIN --exclude='Thumbnail_Images' --exclude="Images" --exclude "FocusModelGeneration" --exclude='Autocenter' --exclude='InstrumentAnalyticsLogs' --exclude "Logs" \
+            if [[ -f "$EXCLUSIONS_FILE" && -s "$EXCLUSIONS_FILE" ]]; then EXCLUSION_STR="--exclude-from=$EXCLUSIONS_FILE"; else EXCLUSION_STR=""; fi
+            
+            # Build static exclusion arguments from array
+            STATIC_EXCLUSIONS=()
+            for exclusion in "${TAR_EXCLUSIONS_ARRAY[@]}"; do
+                STATIC_EXCLUSIONS+=("--exclude=$exclusion")
+            done
+            
+                $TAR_BIN "${STATIC_EXCLUSIONS[@]}" \
                 --create \
                 --blocking-factor=1 \
                 --sparse \
