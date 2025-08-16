@@ -23,6 +23,10 @@ if [[ "$#" -ne 2 ]]; then
     echo "This script creates incremental gzipped tarballs and syncs them"
     echo "to a single tarball in a GS bucket. The tarballs use optimized"
     echo "tar settings for efficient concatenation and standard extraction."
+    echo "Each tar chunk includes metadata labels with run info, timestamps,"
+    echo "and machine details. Use 'tar --test-label -f chunk.tar.gz' to view"
+    echo "individual chunk labels, or 'tar -tvf combined.tar.gz | grep Volume'"
+    echo "to see all labels in the final composed archive."
     echo ""
     echo "Dependencies: GNU tar, google-cloud-sdk (with crcmod installed)"
     echo ""
@@ -73,6 +77,7 @@ chunk_size_bytes=$(expr $CHUNK_SIZE_MB \* 1048576) # $CHUNK_SIZE_MB*1024^2
 RUN_COMPLETION_TIMEOUT_SEC=$(expr $RUN_COMPLETION_TIMEOUT_DAYS \* 86400)
 
 size_at_last_check=0
+tar_increment_counter=0
 
 TAR_BIN="tar"
 GSUTIL_CMD='gsutil'
@@ -84,6 +89,201 @@ if [ "$(uname)" == "Darwin" ]; then
 fi
 
 $GSUTIL_CMD version -l
+
+# Function to detect external IP address using multiple methods
+get_external_ip() {
+    local ip=""
+    
+    # Check if required tools are available
+    local has_dig=$(command -v dig &> /dev/null && echo "true" || echo "false")
+    local has_curl=$(command -v curl &> /dev/null && echo "true" || echo "false")
+    local has_awk=$(command -v awk &> /dev/null && echo "true" || echo "false")
+    
+    if [[ "$has_dig" == "true" && "$has_awk" == "true" ]]; then
+        # Method 1: Google DNS TXT record
+        ip=$(dig +short txt o-o.myaddr.l.google.com @ns1.google.com 2>/dev/null | awk -F'"' '{print $2}' | tr -d '\n\r"' | head -1)
+        if [[ -n "$ip" && "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$ip"
+            return
+        fi
+        
+        # Method 2: OpenDNS
+        ip=$(dig +short myip.opendns.com @resolver1.opendns.com 2>/dev/null | tr -d '\n\r"' | head -1)
+        if [[ -n "$ip" && "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$ip"
+            return
+        fi
+        
+        # Method 3: Cloudflare
+        ip=$(dig +short txt ch whoami.cloudflare @1.0.0.1 2>/dev/null | tr -d '\n\r"' | head -1)
+        if [[ -n "$ip" && "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$ip"
+            return
+        fi
+        
+        # Method 4: Google DNS (alternative)
+        ip=$(dig +short txt o-o.myaddr.l.google.com @ns1.google.com 2>/dev/null | tr -d '\n\r"' | head -1)
+        if [[ -n "$ip" && "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$ip"
+            return
+        fi
+    fi
+    
+    if [[ "$has_curl" == "true" ]]; then
+        # Method 5: AWS checkip
+        ip=$(curl -s --max-time 5 checkip.amazonaws.com 2>/dev/null | tr -d '\n\r"' | head -1)
+        if [[ -n "$ip" && "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$ip"
+            return
+        fi
+    fi
+    
+    # Fallback: try to get local interface IP
+    if command -v ip &> /dev/null; then
+        local local_ip=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \K\S+' 2>/dev/null | head -1)
+        if [[ -n "$local_ip" && "$local_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$local_ip"
+            return
+        fi
+    elif command -v route &> /dev/null; then
+        # macOS/BSD fallback using route command
+        local local_ip=$(route get 8.8.8.8 2>/dev/null | awk '/interface:/ {getline; if(/inet/) print $2}' | head -1)
+        if [[ -n "$local_ip" && "$local_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$local_ip"
+            return
+        fi
+    fi
+    
+    # Final fallback
+    echo "0.0.0.0"
+}
+
+# Function to detect if running via cron
+is_cron_execution() {
+    # Check if CRON_INVOKED is set by monitor_runs.sh
+    if [[ -n "$CRON_INVOKED" ]]; then
+        echo "$CRON_INVOKED"
+        return
+    fi
+    
+    # Detect based on environment characteristics
+    if [[ -z "$TERM" || "$TERM" == "dumb" ]] && [[ -z "$SSH_CLIENT" ]] && [[ -z "$SSH_TTY" ]]; then
+        echo "true"
+    else
+        echo "false"
+    fi
+}
+
+# Function to generate enhanced tar label metadata
+generate_tar_label() {
+    local run_basename="$1"
+    local increment_num="$2"
+    local timestamp_formatted=$(date +%y-%m-%dT%H:%M)
+    local hostname=$(hostname)
+    local username=$(whoami)
+    local external_ip=$(get_external_ip)
+    local is_cron=$(is_cron_execution)
+    
+    # GNU tar volume labels have a strict 99-byte limit, but support control characters
+    # Try compact JSON first, then fall back to pipe-separated format if too long
+    local json_metadata="{\"r\":\"${run_basename:0:15}\",\"t\":\"$timestamp_formatted\",\"i\":$increment_num,\"h\":\"${hostname:0:8}\",\"u\":\"${username:0:8}\",\"ip\":\"$external_ip\",\"c\":$([ "$is_cron" = "true" ] && echo 1 || echo 0)}"
+    
+    if [[ ${#json_metadata} -le 99 ]]; then
+        # Use JSON format (human and machine readable)
+        echo "$json_metadata"
+    else
+        # Fallback to pipe-separated format (very compact)
+        local pipe_format="${run_basename:0:15}|$timestamp_formatted|$increment_num|${hostname:0:8}|${username:0:8}|$external_ip|$([ "$is_cron" = "true" ] && echo 1 || echo 0)"
+        if [[ ${#pipe_format} -le 99 ]]; then
+            echo "$pipe_format"
+        else
+            # Last resort: compress with gzip and base64 encode
+            local compressed=$(echo "$json_metadata" | gzip | base64 | tr -d '\n')
+            local max_len=$((99 - 3)) # Reserve 3 chars for "gz:" prefix
+            echo "gz:${compressed:0:$max_len}"
+        fi
+    fi
+}
+
+# Function to generate verbose metadata JSON file for the entire upload process
+generate_verbose_metadata() {
+    local run_basename="$1"
+    local run_path="$2"
+    local destination_bucket="$3"
+    local start_time="$4"
+    local current_time=$(date +%s)
+    local timestamp_formatted=$(date -d "@$current_time" +%Y-%m-%dT%H:%M:%S%z 2>/dev/null || date -r "$current_time" +%Y-%m-%dT%H:%M:%S%z)
+    local start_timestamp=$(date -d "@$start_time" +%Y-%m-%dT%H:%M:%S%z 2>/dev/null || date -r "$start_time" +%Y-%m-%dT%H:%M:%S%z)
+    local hostname=$(hostname)
+    local username=$(whoami)
+    local external_ip=$(get_external_ip)
+    local is_cron=$(is_cron_execution)
+    local script_version=$(grep "^# version: " "$0" | head -1 | sed 's/^# version: //' || echo "unknown")
+    local final_increment=$tar_increment_counter
+    local upload_duration=$((current_time - start_time))
+    
+    # Get executable versions
+    local gsutil_version=$(gsutil version 2>/dev/null | head -1 | awk '{print $3}' || echo "unknown")
+    local gcloud_version=$(gcloud version --format="value(Google Cloud SDK)" 2>/dev/null || echo "unknown")
+    local tar_version=$($TAR_BIN --version 2>/dev/null | head -1 || echo "unknown")
+    local bash_version=$($BASH --version 2>/dev/null | head -1 || echo "$BASH_VERSION")
+    
+    # Get run size information
+    local run_size_bytes=0
+    if [ -d "$run_path" ]; then
+        if [ "$(uname)" != "Darwin" ]; then
+            run_size_bytes=$(du -sb "$run_path" 2>/dev/null | cut -f1 || echo 0)
+        else
+            run_size_bytes=$(du -sk "$run_path" 2>/dev/null | awk '{print $1 * 1024}' || echo 0)
+        fi
+    fi
+    
+    # Create comprehensive metadata JSON
+    cat << EOF
+{
+  "upload_metadata": {
+    "run_basename": "$run_basename",
+    "run_path": "$run_path",
+    "destination_bucket": "$destination_bucket",
+    "upload_start_time": "$start_timestamp",
+    "upload_completion_time": "$timestamp_formatted",
+    "upload_duration_seconds": $upload_duration,
+    "total_increments": $final_increment,
+    "run_size_bytes": $run_size_bytes,
+    "cron_invoked": $is_cron
+  },
+  "uploading_machine_info": {
+    "hostname": "$hostname",
+    "username": "$username",
+    "external_ip": "$external_ip",
+    "operating_system": "$(uname -s)",
+    "architecture": "$(uname -m)",
+    "script_version": "$script_version"
+  },
+  "tool_versions": {
+    "gsutil_version": "$gsutil_version",
+    "gcloud_version": "$gcloud_version",
+    "tar_version": "$tar_version",
+    "bash_version": "$bash_version"
+  },
+  "environment_variables": {
+    "chunk_size_mb": $CHUNK_SIZE_MB,
+    "delay_between_increments_sec": $DELAY_BETWEEN_INCREMENTS_SEC,
+    "run_completion_timeout_days": $RUN_COMPLETION_TIMEOUT_DAYS,
+    "staging_area_path": "$STAGING_AREA_PATH",
+    "source_path_is_on_nfs": "$SOURCE_PATH_IS_ON_NFS"
+  },
+  "tar_settings": {
+    "tar_binary": "$TAR_BIN",
+    "blocking_factor": 1,
+    "sparse_enabled": true,
+    "eof_trimming": "incremental_only",
+    "excluded_directories": ["Thumbnail_Images", "Images", "FocusModelGeneration", "Autocenter", "InstrumentAnalyticsLogs", "Logs"]
+  },
+  "generation_timestamp": "$timestamp_formatted"
+}
+EOF
+}
 
 # if the run does not already exist on the destination, commence upload process...
 if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.tar.gz" &> /dev/null; then
@@ -152,6 +352,12 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
             echo "commencing sync on latest data"
             size_at_last_check=$current_size
             timestamp=$(date +%s) # intentionally called before tar so time is a little older    
+            
+            # increment counter for this tarball
+            tar_increment_counter=$((tar_increment_counter + 1))
+            
+            # generate enhanced tar label with metadata
+            tar_label=$(generate_tar_label "$RUN_BASENAME" "$tar_increment_counter")
 
             # increate incremental tarballs
             # see: https://www.gnu.org/software/tar/manual/html_node/Incremental-Dumps.html
@@ -160,7 +366,7 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
             # '-C "${PATH_TO_UPLOAD}" ." so we don't store the full path (-C is cd)
             # '--blocking-factor=1' prevents extra zero-padding blocks for efficient concatenation
             # '--sparse' consolidates runs of zeros in input files
-            # '--label' adds human-readable note with run ID
+            # '--label' adds enhanced metadata (JSON or pipe-separated format within 99-byte tar limit)
             # 'head --bytes -1024' trims EOF blocks for incremental tarballs; final tarball preserves EOF blocks
             if [[ "$SOURCE_PATH_IS_ON_NFS" == "true" ]]; then SHOULD_CHECK_DEVICE_STR="--no-check-device"; else SHOULD_CHECK_DEVICE_STR=""; fi
             if [[ "$run_is_finished" == 'true' ]]; then EOF_PROCESSOR="cat"; else EOF_PROCESSOR="head --bytes -1024"; fi
@@ -168,7 +374,7 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
                 --create \
                 --blocking-factor=1 \
                 --sparse \
-                --label="${RUN_BASENAME}" \
+                --label="$tar_label" \
                 $SHOULD_CHECK_DEVICE_STR \
                 --listed-incremental="${STAGING_AREA_PATH}/${RUN_BASENAME}/index" \
                 -C "${PATH_TO_UPLOAD}" . | $EOF_PROCESSOR | gzip > "${STAGING_AREA_PATH}/${RUN_BASENAME}/${timestamp}_part-1.tar.gz"
@@ -257,6 +463,9 @@ if ! $GSUTIL_CMD ls "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/${RUN_BASENAME}.
 
     # create a note about the tarball
     echo "$RUN_BASENAME.tar.gz created using optimized tar settings for efficient concatenation. Can be extracted with standard tar commands." | gsutil cp - "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/$RUN_BASENAME.tar.gz.README.txt"
+    
+    # create and upload verbose metadata JSON file
+    generate_verbose_metadata "$RUN_BASENAME" "$PATH_TO_UPLOAD" "$DESTINATION_BUCKET_PREFIX" "$START_TIME" | gsutil cp - "${DESTINATION_BUCKET_PREFIX}/$RUN_BASENAME/$RUN_BASENAME.upload_metadata.json"
 
     # if only the index file is present, remove it
     if [[ $(ls -1 "${STAGING_AREA_PATH}/${RUN_BASENAME}" | wc -l) -eq 1 ]]; then

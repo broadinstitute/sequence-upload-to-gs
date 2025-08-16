@@ -6,7 +6,7 @@
 # depends on:
 # google-cloud-sdk
 # pstree (separate install on mac, 'brew install pstree')
-# IMPORTANT: resulting tarball must be extracted with GNU tar and "--ignore-zeros" specified
+# Uses optimized tar settings (--blocking-factor=1, --sparse, EOF trimming) for efficient concatenation
 
 if [[ "$#" -ne 2 ]]; then
     echo "--------------------------------------------------------------------"
@@ -99,7 +99,12 @@ while true; do
                   upload_cmd="${SCRIPTPATH}/incremental_illumina_upload_to_gs.sh ${found_dir} ${DESTINATION_BUCKET_PREFIX}"
                   echo "    ${upload_cmd}"
                   # fork incremental upload to separate process
-                  (STAGING_AREA_PATH="${STAGING_AREA_PATH}" ${upload_cmd}) &
+                  # pass cron detection info via environment variable
+                  if [[ $CRON -gt 0 ]]; then
+                      (STAGING_AREA_PATH="${STAGING_AREA_PATH}" CRON_INVOKED="true" ${upload_cmd}) &
+                  else
+                      (STAGING_AREA_PATH="${STAGING_AREA_PATH}" CRON_INVOKED="false" ${upload_cmd}) &
+                  fi
                 else
                     echo "Skipping initiation of new upload (upload in progress): ${STAGING_AREA_PATH}/${RUN_BASENAME}"
                 fi
