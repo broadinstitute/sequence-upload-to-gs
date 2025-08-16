@@ -184,16 +184,30 @@ generate_tar_label() {
     local external_ip=$(get_external_ip)
     local is_cron=$(is_cron_execution)
     
+    # Intelligently shorten run basename: extract last component after underscores, then truncate if needed
+    local short_run_basename="$run_basename"
+    if [[ "$run_basename" =~ _ ]]; then
+        # Extract last component after final underscore
+        short_run_basename="${run_basename##*_}"
+        # If still too long, truncate to 15 chars
+        if [[ ${#short_run_basename} -gt 15 ]]; then
+            short_run_basename="${short_run_basename:0:15}"
+        fi
+    else
+        # No underscores, just truncate
+        short_run_basename="${run_basename:0:15}"
+    fi
+    
     # GNU tar volume labels have a strict 99-byte limit, but support control characters
     # Try compact JSON first, then fall back to pipe-separated format if too long
-    local json_metadata="{\"r\":\"${run_basename:0:15}\",\"t\":\"$timestamp_formatted\",\"i\":$increment_num,\"h\":\"${hostname:0:8}\",\"u\":\"${username:0:8}\",\"ip\":\"$external_ip\",\"c\":$([ "$is_cron" = "true" ] && echo 1 || echo 0)}"
+    local json_metadata="{\"r\":\"$short_run_basename\",\"t\":\"$timestamp_formatted\",\"i\":$increment_num,\"h\":\"${hostname:0:8}\",\"u\":\"${username:0:8}\",\"ip\":\"$external_ip\",\"c\":$([ "$is_cron" = "true" ] && echo 1 || echo 0)}"
     
     if [[ ${#json_metadata} -le 99 ]]; then
         # Use JSON format (human and machine readable)
         echo "$json_metadata"
     else
         # Fallback to pipe-separated format (very compact)
-        local pipe_format="${run_basename:0:15}|$timestamp_formatted|$increment_num|${hostname:0:8}|${username:0:8}|$external_ip|$([ "$is_cron" = "true" ] && echo 1 || echo 0)"
+        local pipe_format="$short_run_basename|$timestamp_formatted|$increment_num|${hostname:0:8}|${username:0:8}|$external_ip|$([ "$is_cron" = "true" ] && echo 1 || echo 0)"
         if [[ ${#pipe_format} -le 99 ]]; then
             echo "$pipe_format"
         else
